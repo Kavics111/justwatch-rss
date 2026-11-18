@@ -31,6 +31,8 @@ COUNTRY = "HU"          # országkód
 LANGUAGE = "hu"         # nyelv
 MAX_ITEMS = 80          # hány tétel kerüljön a feedbe (API max ~600)
 POSTER_PROFILE = "s332" # poszter méret (s166, s332, s592 ...)
+PAGE_SIZE = 100         # tétel/lapkérés -- az API ~100 felett "page too large" hibát ad
+MAX_PAGES = 6           # max hány lapot kérjen le (6*100 = a teljes ~600-as lista)
 
 # Ha csak bizonyos szolgáltatók újdonságai érdekelnek, írd ide a neveket
 # (pontosan, ahogy a JustWatch adja, pl. "Netflix", "Max", "Disney Plus").
@@ -49,9 +51,9 @@ USER_AGENT = (
 )
 
 QUERY = """
-query GetNewTitles($country: Country!, $language: Language!, $first: Int!) {
-  newTitles(country: $country, first: $first) {
-    totalCount
+query GetNewTitles($country: Country!, $language: Language!, $first: Int!, $after: String) {
+  newTitles(country: $country, first: $first, after: $after) {
+    pageInfo { endCursor hasNextPage }
     edges {
       node {
         __typename
@@ -82,10 +84,11 @@ query GetNewTitles($country: Country!, $language: Language!, $first: Int!) {
 """
 
 
-def fetch_new_titles(first):
+def _fetch_page(first, after):
     body = json.dumps(
         {"query": QUERY,
-         "variables": {"country": COUNTRY, "language": LANGUAGE, "first": first}}
+         "variables": {"country": COUNTRY, "language": LANGUAGE,
+                       "first": first, "after": after}}
     ).encode("utf-8")
     req = urllib.request.Request(
         ENDPOINT,
@@ -97,7 +100,22 @@ def fetch_new_titles(first):
         payload = json.loads(resp.read().decode("utf-8"))
     if payload.get("errors"):
         raise RuntimeError(f"GraphQL hiba: {payload['errors']}")
-    return payload["data"]["newTitles"]["edges"]
+    return payload["data"]["newTitles"]
+
+
+def fetch_new_titles(target):
+    """Lapozva kéri le a tételeket, amíg össze nem gyűlik `target` darab
+    (vagy elfogy a lista / elértük a MAX_PAGES-t)."""
+    edges = []
+    after = None
+    for _ in range(MAX_PAGES):
+        nt = _fetch_page(PAGE_SIZE, after)
+        edges.extend(nt.get("edges") or [])
+        info = nt.get("pageInfo") or {}
+        after = info.get("endCursor")
+        if len(edges) >= target or not info.get("hasNextPage") or not after:
+            break
+    return edges
 
 
 def poster_url(template):
@@ -228,8 +246,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="rss.xml", help="kimeneti RSS fájl")
     ap.add_argument("--self-url", default=None, help="a feed szétküldött URL-je (atom:link self)")
-    ap.add_argument("--first", type=int, default=max(MAX_ITEMS * 3, 120),
-                    help="hány tételt kérjen le az API-tól (szűrés előtt)")
     ap.add_argument("--mock-file", default=None, help="offline teszt: elmentett API JSON-ból olvas")
     args = ap.parse_args()
 
@@ -239,7 +255,10 @@ def main():
                 data = json.load(f)
             edges = data["data"]["newTitles"]["edges"]
         else:
-            edges = fetch_new_titles(args.first)
+            # Szűrés nélkül elég MAX_ITEMS tétel; allowlist esetén lapozzunk
+            # végig (sok tétel kieshet a szűrőn).
+            target = MAX_ITEMS * 50 if PROVIDER_ALLOWLIST else MAX_ITEMS
+            edges = fetch_new_titles(target)
     except Exception as e:  # noqa: BLE001
         print(f"HIBA a lekérdezéskor: {e}", file=sys.stderr)
         return 1
