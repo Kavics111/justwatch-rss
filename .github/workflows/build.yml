@@ -1,0 +1,57 @@
+name: Build JustWatch RSS
+
+on:
+  schedule:
+    # Hatóránként fut (UTC). Módosítsd kedvedre; a cron mindig UTC-ben van.
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}   # kézi indítás az Actions fülről
+  push:
+    branches: [ main ]    # minden push után is frissül
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Egyszerre csak egy deploy fusson
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Feed generálása
+        env:
+          # Opcionális felülírás: Settings → Secrets and variables → Actions → Variables,
+          # hozz létre egy FEED_SELF_URL nevűt, ha egyedi domaint használsz.
+          FEED_SELF_URL: ${{ vars.FEED_SELF_URL }}
+        run: |
+          SELF="${FEED_SELF_URL:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/rss.xml}"
+          python generate_feed.py --out _site/rss.xml --self-url "$SELF"
+
+      - name: Landing oldal bemásolása
+        run: cp index.html _site/index.html
+
+      - name: Pages artifact feltöltése
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
